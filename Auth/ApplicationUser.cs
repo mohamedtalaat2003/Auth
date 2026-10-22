@@ -1,0 +1,11 @@
+﻿using Microsoft.AspNetCore.Identity;
+
+namespace Auth
+{
+    public class ApplicationUser: IdentityUser
+    {
+        public string FirstName { get; set; }
+        public string lastName { get; set; }
+        public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    }
+}
