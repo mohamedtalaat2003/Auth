@@ -4,9 +4,9 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Auth
 {
-    public class DbContet : IdentityDbContext<ApplicationUser>
+    public class AuthDbContet : IdentityDbContext<ApplicationUser>
     {
-        public DbContet(DbContextOptions<DbContet> options) : base(options) { }
+        public AuthDbContet(DbContextOptions<AuthDbContet> options) : base(options) { }
 
         override protected void OnModelCreating(ModelBuilder builder)
         {

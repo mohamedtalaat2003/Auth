@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Identity;
+﻿using Auth.Controllers;
+using Microsoft.AspNetCore.Identity;
 
 namespace Auth
 {
@@ -7,5 +8,6 @@ namespace Auth
         public string FirstName { get; set; }
         public string lastName { get; set; }
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+        public List<RefreshToken> RefreshTokens { get; set; } = new List<RefreshToken>();
     }
 }
