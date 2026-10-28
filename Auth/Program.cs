@@ -1,29 +1,19 @@
 using Auth;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
-using System.Security.Claims;
 using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
-var domain = $"https://{builder.Configuration["Auth0:Domain"]}/";
-// Add services to the container.
-
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
-builder.Services.AddEndpointsApiExplorer();
-
 
 builder.Services.AddDbContext<AuthDbContet>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("AuthDB")));
-
-
-//builder.Services.AddSingleton<IAuthorizationHandler, HasScopeHandler>();
+    options.UseNpgsql(
+        builder.Configuration.GetConnectionString("AuthDB")));
 
 //Configure Identity
 builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
@@ -57,134 +47,139 @@ builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
 
 }).AddEntityFrameworkStores<AuthDbContet>()
     .AddDefaultTokenProviders();
+//// Identity's Application Cookie authenticates normal API requests.
+//builder.Services.ConfigureApplicationCookie(options =>
+//{
+//    options.Cookie.Name = "__Host-MyApp.Auth";
+//    options.Cookie.HttpOnly = true;
+//    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+//    options.Cookie.SameSite = SameSiteMode.Lax;
+//    options.Cookie.Path = "/";
 
-builder.Services.ConfigureApplicationCookie(options =>
-{
-    options.Cookie.HttpOnly = true;
-    options.Cookie.Name = "_Host-MyApp.Auth";
-    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
-    options.Cookie.SameSite = SameSiteMode.Lax;
-    options.Cookie.Path = "/";
+//    options.ExpireTimeSpan = TimeSpan.FromHours(8);
+//    options.SlidingExpiration = true;
 
-    options.ExpireTimeSpan = TimeSpan.FromHours(8);
-    options.SlidingExpiration = true;
+//    // APIs should return 401/403, not redirect API calls to an HTML login page.
+//    options.Events.OnRedirectToLogin = context =>
+//    {
+//        context.Response.StatusCode =
+//            StatusCodes.Status401Unauthorized;
+//        return Task.CompletedTask;
+//    };
 
-    options.Events.OnRedirectToLogin = context =>
+//    options.Events.OnRedirectToAccessDenied = context =>
+//    {
+//        context.Response.StatusCode =
+//            StatusCodes.Status403Forbidden;
+//        return Task.CompletedTask;
+//    };
+//});
+
+// Google signs into Identity's temporary external cookie.
+builder.Services
+    .AddAuthentication(options =>
     {
-        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-        return Task.CompletedTask;
-    };
-
-    options.Events.OnRedirectToAccessDenied = context =>
+        options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+        options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+    })
+    .AddJwtBearer(options =>
     {
-        context.Response.StatusCode =
-            StatusCodes.Status403Forbidden;
-        return Task.CompletedTask;
-    };
-});
+        options.TokenValidationParameters = new Microsoft.IdentityModel.Tokens.TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateLifetime = true,
+            ValidateAudience = true,
+            ValidateIssuerSigningKey = true,
 
-builder.Services.AddAuthentication(options =>
-{
-    options.DefaultAuthenticateScheme =
-        JwtBearerDefaults.AuthenticationScheme;
+            ValidIssuer = builder.Configuration["JWT:issu"],
+            ValidAudience = builder.Configuration["JWT:Aud"],
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["JWT:Key"]))
+        };
 
-    options.DefaultChallengeScheme =
-        JwtBearerDefaults.AuthenticationScheme;
-
-}).AddJwtBearer(options =>
-{
-    options.TokenValidationParameters = new Microsoft.IdentityModel.Tokens.TokenValidationParameters
+    }).AddGoogleOpenIdConnect(options =>
     {
-        ValidateAudience = true,
-        ValidateIssuer = true,
-        ValidateIssuerSigningKey = true,
-        ValidateLifetime = true,
+        options.ClientId = builder.Configuration["ClientId"];
+        options.ClientSecret = builder.Configuration["ClientSecret"];
 
-        ValidIssuer = builder.Configuration["JWT:issu"],
-        ValidAudience = builder.Configuration["JWT:Aud"],
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["JWT:Key"] ?? throw new InvalidOperationException(
-                            "JWT:Key is missing")))
+        options.SignInScheme = IdentityConstants.ExternalScheme;
+        options.UsePkce = true;
+        options.Scope.Add("email");
+        options.Scope.Add("profile");
+    });
+    //.AddGoogle(options =>
+    //{
+    //    options.ClientId =
+    //        builder.Configuration["ClientId"]!;
 
-    };
-    options.Authority = domain;
-    options.Audience = builder.Configuration["Auth0:Audience"];
+//    options.ClientSecret =
+//        builder.Configuration["ClientSecret"]!;
 
+//    options.SignInScheme = IdentityConstants.ExternalScheme;
+//    options.CallbackPath = "/signin-google";
 
+//    options.Scope.Add("email");
+//    options.Scope.Add("profile");
 
-    options.TokenValidationParameters = new TokenValidationParameters
-    {
-        NameClaimType = ClaimTypes.NameIdentifier
-    };
-}).AddGoogle(options =>
-{
+//    options.UsePkce = true;
+//});
 
-    options.ClientId =
-        builder.Configuration["ClientId"];
-
-    options.ClientSecret = 
-        builder.Configuration["ClientSecret"];
-
-    options.SignInScheme = IdentityConstants.ExternalScheme;
-    options.CallbackPath = "/signin-google";
-    options.SaveTokens = true;
-
-    options.Scope.Add("email");
-    options.Scope.Add("profile");
-});
-
-builder.Services.AddAuthorization(options =>
+builder.Services.AddAuthorization(options=>
 {
     options.AddPolicy("RequireAdministratorRole", policy => policy.RequireRole("Admin"));
     options.AddPolicy("RequireUserRole", policy => policy.RequireRole("User"));
-    options.AddPolicy("RequireManagerRole", policy => policy.RequireRole("Manager"));
-    //policy.Requirements.Add(new HasScopeRequirement("read:messages", domain)));
+    //options.AddPolicy("RequireManagerRole", policy => policy.RequireRole("Manager"));
     //options.AddPolicy("RequireAdminOrManagerRole", policy => policy.RequireRole("Admin", "Manager"));
 });
 
-builder.Services.AddAntiforgery(options =>
-{
-    options.HeaderName = "X_CSRF_TOKEN";
-    options.Cookie.Name = "_Host-MyApp.Xsrf";
-    options.Cookie.HttpOnly = true;
-    options.Cookie.SameSite = SameSiteMode.Lax;
-    options.Cookie.Path = "/";
-});
+//builder.Services.AddAntiforgery(options =>
+//{
+//    options.HeaderName = "X-CSRF-TOKEN";
+//    options.Cookie.Name = "__Host-MyApp.Xsrf";
+//    options.Cookie.HttpOnly = true;
+//    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+//    options.Cookie.SameSite = SameSiteMode.Lax;
+//    options.Cookie.Path = "/";
+//});
 
-builder.Services.AddControllers(options=>
-{
-    options.Filters.Add(new AutoValidateAntiforgeryTokenAttribute());
-});
-var frontenUrl = builder.Configuration["Frontend:BaseUrl"];
+builder.Services.AddControllers();
+    //(options =>
+//{
+//    // Automatically validates CSRF tokens on unsafe HTTP methods.
+//    options.Filters.Add(
+//        new Microsoft.AspNetCore.Mvc.AutoValidateAntiforgeryTokenAttribute());
+//});
+
+var frontendUrl = builder.Configuration["Frontend:BaseUrl"]
+    ?? throw new InvalidOperationException(
+        "Frontend:BaseUrl is missing.");
 
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("Frontend", policy =>
     {
         policy
-            .WithOrigins(frontenUrl)
+            .WithOrigins(frontendUrl)
             .AllowAnyHeader()
             .AllowAnyMethod()
             .AllowCredentials();
-
     });
 });
+
+builder.Services.AddScoped<ITokenService, TokenService>();
+
 var app = builder.Build();
+
 
 using (var scope = app.Services.CreateScope())
 {
     var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
-    await RoleHelper.EnsureRolesCreated(roleManager);
-}
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
 }
 
 app.UseHttpsRedirection();
 
 app.UseRouting();
 app.UseCors("Frontend");
+
 app.UseAuthentication();
 app.UseAuthorization();
 

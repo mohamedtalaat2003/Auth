@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Identity;
+﻿using Auth.Controllers;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 
@@ -24,8 +25,42 @@ namespace Auth
                 entity.ToTable(name: "Roles");
             });
 
+            builder.Entity<RefreshToken>(entity =>
+            {
+                entity.ToTable("RefreshTokens");
+                entity.HasKey(x => x.Id);
 
+                entity.HasIndex(x => x.TokenHash).IsUnique();
 
+                entity.HasOne(x => x.User)
+                .WithMany(x => x.RefreshTokens)
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            builder.Entity<ExternalLoginCode>(entity =>
+            {
+                entity.HasKey(x => x.Id);
+                entity.Property(x => x.CodeHash)
+                .HasMaxLength(100)
+                .IsRequired();
+
+                entity.Property(x => x.BrowserBindingHash)
+                .HasMaxLength(100)
+                .IsRequired();
+
+                entity.HasIndex(x => x.CodeHash);
+
+                entity.HasOne(x => x.User)
+                .WithMany()
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+            });
         }
+
+        public DbSet<RefreshToken> RefreshTokens { get; set; }
+        public DbSet<ExternalLoginCode> externalLoginCodes { get; set; }
+
+
     }
-}
+  }

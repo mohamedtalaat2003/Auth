@@ -1,4 +1,6 @@
-﻿using Microsoft.AspNetCore.Authentication;
+﻿using Google.Apis.Auth.AspNetCore3;
+using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authorization;
@@ -22,13 +24,24 @@ namespace Auth.Controllers
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly SignInManager<ApplicationUser> _signInManager;
         private readonly IConfiguration _config;
+        private readonly IAntiforgery _antiforgery;
+        private readonly ITokenService _tokenService;
 
-        public AuthController(ILogger<AuthController> logger, UserManager<ApplicationUser> userManager, SignInManager<ApplicationUser> signInManager, IConfiguration config)
+        private const string GoogleBindingCookie = "_Host-GoogleLogin";
+        private readonly AuthDbContet _db;
+
+
+        public AuthController(ILogger<AuthController> logger, UserManager<ApplicationUser> userManager, SignInManager<ApplicationUser> signInManager,
+            IConfiguration config, IAntiforgery antiforgery,
+            AuthDbContet db, ITokenService tokenService)
         {
             _logger = logger;
             _userManager = userManager;
             _signInManager = signInManager;
             _config = config;
+            _antiforgery = antiforgery;
+            _db = db;
+            _tokenService = tokenService;
         }
 
         [HttpPost("register")]
@@ -80,7 +93,7 @@ namespace Auth.Controllers
                 return Ok(new
                 {
                     accessToken = accessToken,
-                    refreshToken = refreshToken.token
+                    refreshToken = refreshToken.TokenHash
                 });
             }
             return BadRequest("Invalid credentials");
@@ -89,7 +102,7 @@ namespace Auth.Controllers
         [HttpPost("refresh-token")]
         public async Task<IActionResult> RefreshToken([FromBody] RefreshTokenDto model)
         {
-            var user = _userManager.Users.SingleOrDefaultAsync(u => u.RefreshTokens.Any(t=>t.expires > DateTime.UtcNow && t.token == model.token))?? throw new Exception("Invalid refresh token");
+            var user = _userManager.Users.SingleOrDefaultAsync(u => u.RefreshTokens.Any(t => t.ExpiresAtUtc > DateTime.UtcNow && t.TokenHash == model.token)) ?? throw new Exception("Invalid refresh token");
             if (user == null)
             {
                 return BadRequest("Invalid refresh token");
@@ -98,7 +111,7 @@ namespace Auth.Controllers
             var newAccessToken = GenerateJwtToken(user.Result);
             var newRefreshToken = GenerateRefreshToken();
 
-            user.Result.RefreshTokens.RemoveAll(t => t.token == model.token);
+            user.Result.RefreshTokens.RemoveAll(t => t.TokenHash == model.token);
             user.Result.RefreshTokens.Add(newRefreshToken);
 
             await _userManager.UpdateAsync(user.Result);
@@ -106,7 +119,7 @@ namespace Auth.Controllers
             return Ok(new
             {
                 accessToken = newAccessToken,
-                refreshToken = newRefreshToken.token
+                refreshToken = newRefreshToken.TokenHash
             });
 
         }
@@ -115,8 +128,8 @@ namespace Auth.Controllers
         {
             return new RefreshToken
             {
-                token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64)),
-                expires = DateTime.UtcNow.AddDays(7)
+                TokenHash = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64)),
+                ExpiresAtUtc = DateTime.UtcNow.AddDays(7)
             };
         }
 
@@ -145,147 +158,233 @@ namespace Auth.Controllers
         }
 
 
-        //Google
+        ////Google
+        //[HttpGet("csrf")]
+        //[AllowAnonymous]
+        //public IActionResult GetCsrfToken()
+        //{
+        //    var tokens = _antiforgery.GetAndStoreTokens(HttpContext);
+
+        //    return Ok(new
+        //    {
+        //        token = tokens.RequestToken
+        //    });
+        //}
+
+        // 2. Start Google authentication.
         [HttpGet("google-login")]
-        public IActionResult Login()
+        [AllowAnonymous]
+        public IActionResult GoogleLogin()
         {
+            var browserbinding = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+
+            Response.Cookies.Append(
+               GoogleBindingCookie,
+               browserbinding,
+               new CookieOptions
+               {
+                   HttpOnly = true,
+                   Secure = true,
+                   SameSite = SameSiteMode.Lax,
+                   Path = "/",
+                   MaxAge = TimeSpan.FromMinutes(5),
+                   IsEssential = true
+               });
+
             var callbackUrl = Url.Action(
-                    nameof(GoogleResponse),
-                    "Auth",
-                    values: null,
-                    protocol: Request.Scheme);
+                nameof(GoogleCallback),
+                "Auth",
+                values: null,   
+                protocol: Request.Scheme);
 
-            var properties = new AuthenticationProperties
-            {
-                RedirectUri = callbackUrl
-            };
+            var properties =
+                _signInManager.ConfigureExternalAuthenticationProperties(
+                    GoogleDefaults.AuthenticationScheme,
+                    callbackUrl!);
 
-
-            return Challenge(properties, GoogleDefaults.AuthenticationScheme);
+            return Challenge(properties, GoogleOpenIdConnectDefaults.AuthenticationScheme);
         }
 
-        [HttpGet("google-response")]
-        public async Task<IActionResult> GoogleResponse()
+        // 3. Google middleware handles /signin-google first.
+        // It then redirects here with the temporary external identity.
+        [HttpGet("google-callback")]
+        [AllowAnonymous]
+        public async Task<IActionResult> GoogleCallback()
         {
-            var externalResult = await HttpContext.AuthenticateAsync
-                (IdentityConstants.ExternalScheme);
-
-            if (!externalResult.Succeeded || externalResult.Principal == null)
+            if(!Request.Cookies.TryGetValue(GoogleBindingCookie, out var browserBinding))
             {
-                return BadRequest("Failed to authenticate with Google");
-            }
-            
-            var principal = externalResult.Principal;
-            var googleId = principal.FindFirstValue(ClaimTypes.NameIdentifier);
-
-            var email = principal.FindFirstValue(ClaimTypes.Email);
-
-            var firstName = principal.FindFirstValue(ClaimTypes.GivenName);
-            var lastName = principal.FindFirstValue(ClaimTypes.Surname);
-
-            if(string.IsNullOrWhiteSpace(googleId) || string.IsNullOrWhiteSpace(email))
-            {
-                return BadRequest("Invalid Google authentication data");
+                return Unauthorized();
             }
 
-            var user = await _userManager.FindByLoginAsync(GoogleDefaults.AuthenticationScheme,
-                googleId);
-            var userByEmail = await _userManager.FindByEmailAsync(email);
+            var info = await _signInManager.GetExternalLoginInfoAsync();
 
-            if (user == null && userByEmail == null)
+            if (info is null)
+                return Unauthorized("Google authentication failed.");
+
+            // Check whether this Google account is already linked.
+            var user = await _userManager.FindByLoginAsync(
+                info.LoginProvider,
+                info.ProviderKey);
+
+            if (user is null)
             {
+                var email = info.Principal.FindFirstValue(ClaimTypes.Email);
+
+                if (string.IsNullOrWhiteSpace(email))
+                    return BadRequest("Google email was not provided.");
+
+                // Don't automatically link an existing account by email alone.
+                var existingUser = await _userManager.FindByEmailAsync(email);
+
+                if (existingUser is not null)
+                    return Conflict("This email already exists. Sign in and link Google.");
+
                 user = new ApplicationUser
                 {
                     UserName = email,
                     Email = email,
-                    FirstName = firstName,
-                    lastName = lastName,
-                    EmailConfirmed = false
+                    EmailConfirmed = false,
+                    FirstName = info.Principal.FindFirstValue(ClaimTypes.GivenName) ?? "",
+                    lastName = info.Principal.FindFirstValue(ClaimTypes.Surname) ?? ""
                 };
-            }
 
-            if (userByEmail != null && user == null)
-            {
-                return Conflict
-                (new
+                var createUser = await _userManager.CreateAsync(user);
+
+                if (!createUser.Succeeded)
+                    return BadRequest(createUser.Errors);
+
+                var roleResult = await _userManager.AddToRoleAsync(user, "User");
+
+                if (!roleResult.Succeeded)
+                    return BadRequest(roleResult.Errors);
+
+                var loginResult = await _userManager.AddLoginAsync(user, info);
+
+                if (!loginResult.Succeeded)
                 {
-                    message = "A user with this email already exists. Please log in using your email and password."
-                });
+                    await _userManager.DeleteAsync(user);
+                    return BadRequest(loginResult.Errors);
+                }
             }
 
-            var createResult = await _userManager.CreateAsync(user);
+            await HttpContext.SignOutAsync(IdentityConstants.ExternalScheme);
 
-            if (!createResult.Succeeded)
-            {
-                return BadRequest(createResult.Errors);
-            }
+            var rowCode = Convert.ToHexString(RandomNumberGenerator.GetBytes(34));
 
-            var roleResult = await _userManager.AddToRoleAsync(user, "User");
+            var codeHash = _tokenService.HashToken(rowCode);
+            var bindingHash = _tokenService.HashToken(browserBinding);
 
-            if (!roleResult.Succeeded)
-            {
-                await _userManager.DeleteAsync(user);
-                return BadRequest(roleResult.Errors);
-            }
-
-            var loginInfo = new UserLoginInfo(GoogleDefaults.AuthenticationScheme, googleId, "Google");
-            var linkResult = await _userManager.AddLoginAsync(user, loginInfo); ;
-
-            if (!linkResult.Succeeded)
-            {
-                await _userManager.DeleteAsync(user);
-                return BadRequest(linkResult.Errors);
-            }
-
-            var accessToken = GenerateJwtToken(user);
-            var refreshToken = GenerateRefreshToken();
-
-            user.RefreshTokens.Add(refreshToken);
-
-            var updateResult = await _userManager.UpdateAsync(user);
-
-            if (!updateResult.Succeeded)
-            {
-                return StatusCode(500, new
+            await _db.externalLoginCodes.AddAsync
+                (new ExternalLoginCode
                 {
-                    message = "Could not save the refresh token."
+                    CodeHash = codeHash,
+                    BrowserBindingHash = bindingHash,
+                    UserId = user.Id,
+                    ExpiresUtc = DateTime.UtcNow.AddMinutes(1)
                 });
-            }
+            await _db.SaveChangesAsync();
 
-            // 7. امسح الـ External Cookie المؤقتة
-            await HttpContext.SignOutAsync(
-                IdentityConstants.ExternalScheme);
+            var frontendUrl = _config["Frontend:BaseUrl"]
+        ?? throw new InvalidOperationException(
+            "Frontend:BaseUrl is missing.");
 
-            // 8. أرجع التوكنز للعميل
-            return Ok(new
-            {
-                accessToken,
-                refreshToken = refreshToken.token
-            });
-
+            return Redirect(
+                $"{frontendUrl}/auth/callback?code={Uri.EscapeDataString(rowCode)}");
         }
 
-        // GET: /api/auth/me
+        // 4. The SPA can check whether the user is signed in.
         [HttpGet("me")]
-        public IActionResult Me()
+        [Authorize]
+        public async Task<IActionResult> Me()
         {
+            var user = await _userManager.GetUserAsync(User);
+
+            if (user is null)
+                return Unauthorized();
+
             return Ok(new
             {
-                IsAuthenticated = User.Identity?.IsAuthenticated ?? false,
-                Name = User.Identity?.Name,
-                Email = User.FindFirstValue(ClaimTypes.Email),
-                UserId = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                user.Id,
+                user.Email,
+                user.UserName,
+                user.FirstName,
+                user.lastName
             });
         }
 
+        // 5. Sign out of the application.
         [HttpPost("logout")]
         [Authorize]
         public async Task<IActionResult> Logout()
         {
-            await HttpContext.SignOutAsync(
-                CookieAuthenticationDefaults.AuthenticationScheme);
+            await _signInManager.SignOutAsync();
 
-            return Ok(new { Message = "Logged out successfully." });
+            return NoContent();
+        }
+
+
+        public sealed record ExchangeCodeRequest(string Code);
+
+        public async Task<IActionResult> ExchangeCode([FromBody] ExchangeCodeRequest request)
+        {
+            if (string.IsNullOrWhiteSpace(request.Code))
+                return BadRequest();
+
+
+            if (!Request.Cookies.TryGetValue(
+                    GoogleBindingCookie, out var browserBinding))
+            {
+                return Unauthorized();
+            }
+
+            var codeHash = TokenService.HashToken(request.Code);
+            var bindingHash = TokenService.HashToken(browserBinding);
+            var now = DateTime.UtcNow;
+
+            var code = await _db.externalLoginCodes
+          .SingleOrDefaultAsync(x =>
+              x.CodeHash == codeHash &&
+              x.BrowserBindingHash == bindingHash &&
+              x.UsedAtUtc == null &&
+              x.ExpiresUtc > now);
+
+            if (code is null)
+                return Unauthorized();
+
+            var consumed = await _db.ExternalLoginCodes
+       .Where(x =>
+           x.Id == code.Id &&
+           x.UsedAtUtc == null &&
+           x.ExpiresAtUtc > now &&
+           x.BrowserBindingHash == bindingHash)
+       .ExecuteUpdateAsync(setters =>
+           setters.SetProperty(x => x.UsedAtUtc, now));
+
+            if (consumed > 1)
+                return Unauthorized();
+            var user = await _userManager.FindByIdAsync(code.UserId);
+
+            if (user is null)
+                return Unauthorized();
+
+            var accessToken =
+                await _tokenService.CreateAccessTokenAsync(user);
+
+            var rawRefreshToken = TokenService.CreateRefreshToken();
+
+            var refreshEntity = _tokenService.CreateRefreshTokenEntity(
+                user, rawRefreshToken);
+
+            _db.RefreshTokens.Add(refreshEntity);
+            await _db.SaveChangesAsync();
+
+            return Ok(new
+            {
+                accessToken,
+                expiresIn = 900,
+                refreshToken = rawRefreshToken
+            });
+
         }
     }
 }
