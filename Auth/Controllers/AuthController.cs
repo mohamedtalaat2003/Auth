@@ -7,7 +7,10 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
@@ -199,7 +202,7 @@ namespace Auth.Controllers
 
             var properties =
                 _signInManager.ConfigureExternalAuthenticationProperties(
-                    GoogleDefaults.AuthenticationScheme,
+                    GoogleOpenIdConnectDefaults.AuthenticationScheme,
                     callbackUrl!);
 
             return Challenge(properties, GoogleOpenIdConnectDefaults.AuthenticationScheme);
@@ -239,11 +242,12 @@ namespace Auth.Controllers
                 if (existingUser is not null)
                     return Conflict("This email already exists. Sign in and link Google.");
 
+
                 user = new ApplicationUser
                 {
                     UserName = email,
                     Email = email,
-                    EmailConfirmed = false,
+                    EmailConfirmed = true,
                     FirstName = info.Principal.FindFirstValue(ClaimTypes.GivenName) ?? "",
                     lastName = info.Principal.FindFirstValue(ClaimTypes.Surname) ?? ""
                 };
@@ -337,8 +341,8 @@ namespace Auth.Controllers
                 return Unauthorized();
             }
 
-            var codeHash = TokenService.HashToken(request.Code);
-            var bindingHash = TokenService.HashToken(browserBinding);
+            var codeHash = _tokenService.HashToken(request.Code);
+            var bindingHash = _tokenService.HashToken(browserBinding);
             var now = DateTime.UtcNow;
 
             var code = await _db.externalLoginCodes
@@ -351,37 +355,46 @@ namespace Auth.Controllers
             if (code is null)
                 return Unauthorized();
 
-            var consumed = await _db.ExternalLoginCodes
+            var consumed = await _db.externalLoginCodes
        .Where(x =>
            x.Id == code.Id &&
            x.UsedAtUtc == null &&
-           x.ExpiresAtUtc > now &&
+           x.ExpiresUtc > now &&
            x.BrowserBindingHash == bindingHash)
        .ExecuteUpdateAsync(setters =>
            setters.SetProperty(x => x.UsedAtUtc, now));
 
             if (consumed > 1)
                 return Unauthorized();
+
             var user = await _userManager.FindByIdAsync(code.UserId);
 
             if (user is null)
                 return Unauthorized();
 
             var accessToken =
-                await _tokenService.CreateAccessTokenAsync(user);
+                await _tokenService.CreateAccessToken(user);
 
-            var rawRefreshToken = TokenService.CreateRefreshToken();
+            var rawRefreshToken = _tokenService.CreateRefreshToken();
 
-            var refreshEntity = _tokenService.CreateRefreshTokenEntity(
-                user, rawRefreshToken);
+            var refreshEntity = await _tokenService
+                .CreateRefreshTokenEntity(user, rawRefreshToken);
 
-            _db.RefreshTokens.Add(refreshEntity);
+            await _db.RefreshTokens.AddAsync(refreshEntity);
             await _db.SaveChangesAsync();
+
+            Response.Cookies.Delete(GoogleBindingCookie, new CookieOptions
+            {
+                Path = "/",
+                Secure = true,
+                HttpOnly = true,
+                SameSite = SameSiteMode.Lax
+            });
 
             return Ok(new
             {
                 accessToken,
-                expiresIn = 900,
+                expiresIn = 900, // must match the previosexpiry specific
                 refreshToken = rawRefreshToken
             });
 

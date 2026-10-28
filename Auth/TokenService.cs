@@ -1,7 +1,11 @@
 ﻿using Auth.Controllers;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.FileSystemGlobbing.Internal;
 using Microsoft.IdentityModel.Tokens;
+using System.Diagnostics.Metrics;
 using System.IdentityModel.Tokens.Jwt;
+using System.Runtime.Intrinsics.X86;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
@@ -12,11 +16,13 @@ namespace Auth
     {
         private readonly IConfiguration _config;
         private readonly UserManager<ApplicationUser> _userManager;
+        private readonly AuthDbContet _db;
 
-        public TokenService(IConfiguration config, UserManager<ApplicationUser> userManager)
+        public TokenService(IConfiguration config, UserManager<ApplicationUser> userManager,AuthDbContet db)
         {
             _config = config;
             _userManager = userManager;
+            _db = db;
         }
         public async Task<string> CreateAccessToken(ApplicationUser user)
         {
@@ -63,11 +69,29 @@ namespace Auth
         }
         public string HashToken(string token)
         {
+            if (token is null)
+                throw new InvalidOperationException("token not found use result pattern better than throw exception");
+
             return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
         }
 
-        public RefreshToken CreateRefreshTokenEntity(ApplicationUser user, string token)
+        public async Task<RefreshToken> CreateRefreshTokenEntity(ApplicationUser user, string token)
         {
+            var exisitingUser = await _db.Users.SingleOrDefaultAsync(x => x.Id == user.Id);
+
+            if (exisitingUser is null)
+                throw new InvalidOperationException("user not found use result pattern better than throw exception");
+
+            if(token is null)
+                throw new InvalidOperationException("token not found use result pattern better than throw exception");
+
+            //var tokenExisting = await _db.RefreshTokens.SingleOrDefaultAsync(x => x.UserId == user.Id && x.TokenHash == token);
+
+            ////if(DateTime.UtcNow < tokenExisting.ExpiresAtUtc && tokenExisting is not null)
+            ////    return 
+
+
+            
             return new RefreshToken
             {
                 UserId = user.Id,
